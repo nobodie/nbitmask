@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 
-use std::fmt;
+use std::fmt::{self, Binary};
 
 #[derive(Clone, Debug)]
 pub enum Error {
@@ -15,161 +15,292 @@ impl fmt::Display for Error {
     }
 }
 
+use std::ops::{Not, Shl, Shr, Sub};
+
 use std::{
     fmt::{Display, Formatter},
     ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign},
 };
 
-#[derive(Clone, Debug)]
-pub struct BitMask {
-    mask: Vec<u64>,
-    size: u32,
+pub trait BitStorage {
+    const SIZE: usize;
+    const ZERO: Self;
+    const ONE: Self;
+
+    fn count_ones(&self) -> usize;
+    fn trailing_zeros(&self) -> usize;
 }
 
-impl BitMask {
-    pub fn zeros(size: u32) -> Self {
-        Self {
-            mask: vec![0; (size / 64) as usize + 1],
+macro_rules! bit_storage_impl_primitive {
+    ($t : ident) => {
+        impl BitStorage for $t {
+            const SIZE: usize = $t::BITS as usize;
+            const ZERO: Self = 0;
+            const ONE: Self = 1;
+
+            fn count_ones(&self) -> usize {
+                $t::count_ones(*self) as usize
+            }
+
+            fn trailing_zeros(&self) -> usize {
+                $t::trailing_zeros(*self) as usize
+            }
+        }
+    };
+}
+
+bit_storage_impl_primitive!(u8);
+bit_storage_impl_primitive!(u16);
+bit_storage_impl_primitive!(u32);
+bit_storage_impl_primitive!(u64);
+bit_storage_impl_primitive!(u128);
+
+#[derive(Clone, Debug)]
+pub struct BitMask<T> {
+    mask: Vec<T>,
+    size: usize,
+}
+
+impl<T> BitMask<T>
+where
+    T: BitStorage + Clone,
+{
+    pub fn zeros(size: usize) -> BitMask<T> {
+        BitMask {
+            mask: vec![T::ZERO; (size / T::SIZE) + 1],
             size,
         }
     }
 
-    pub fn ones(size: u32) -> Self {
+    pub fn size(&self) -> usize {
+        self.size
+    }
+    pub fn count_ones(&self) -> usize {
+        self.mask.iter().map(|m| m.count_ones()).sum()
+    }
+
+    pub fn trailing_zeros(&self) -> usize {
+        let mut acc = 0;
+        for m in &self.mask {
+            let t = m.trailing_zeros();
+            if t != T::SIZE {
+                return acc + t;
+            }
+            acc += T::SIZE;
+        }
+        self.size
+    }
+}
+
+impl<T> BitMask<T>
+where
+    T: BitStorage
+        + Not<Output = T>
+        + Clone
+        + BitAndAssign
+        + Shl<usize, Output = T>
+        + Sub<Output = T>,
+{
+    pub fn ones(size: usize) -> BitMask<T> {
         let mut mask = Self::zeros(size);
         mask.set_all(true);
         mask
     }
 
-    pub fn size(&self) -> u32 {
-        self.size
-    }
-
     pub fn set_all(&mut self, value: bool) {
-        let s = if value { !0x0 } else { 0x0 };
+        let s = if value { !T::ZERO } else { T::ZERO };
         for m in &mut self.mask {
-            *m = s;
+            *m = s.clone();
         }
 
-        let last = self.size / 64;
-        if let Some(m) = self.mask.get_mut(last as usize) {
-            let offset = self.size % 64;
-            let reset = (0x1u64 << offset) - 1;
-            *m &= reset;
+        let last = self.size / T::SIZE;
+        if let Some(m) = self.mask.get_mut(last) {
+            let offset = self.size % T::SIZE;
+            *m &= (T::ONE << offset) - T::ONE;
         }
     }
+}
 
-    pub fn set(&mut self, index: u32, value: bool) -> Result<(), Error> {
-        let i = index / 64;
-        let offset = index % 64;
+impl<T> BitMask<T>
+where
+    T: BitStorage + Not<Output = T> + BitAndAssign + BitOrAssign + Shl<usize, Output = T>,
+{
+    pub fn set(&mut self, index: usize, value: bool) -> Result<(), Error> {
+        let i = index / T::SIZE;
+        let offset = index % T::SIZE;
 
-        if let Some(m) = self.mask.get_mut(i as usize) {
+        if let Some(m) = self.mask.get_mut(i) {
             if value {
-                *m |= 0x1 << offset;
+                *m |= T::ONE << offset;
             } else {
-                *m &= !(0x1 << offset);
+                *m &= !(T::ONE << offset);
             }
             Ok(())
         } else {
             Err(Error::IndexOutOfBounds)
         }
     }
+}
 
-    pub fn get(&self, index: u32) -> Result<bool, Error> {
-        let i = index / 64;
-        let offset = index % 64;
+impl<T> BitMask<T>
+where
+    T: BitStorage + BitAnd<Output = T> + Clone + PartialEq + Shr<usize, Output = T>,
+{
+    pub fn get(&self, index: usize) -> Result<bool, Error> {
+        let i = index / T::SIZE;
+        let offset = index % T::SIZE;
         self.mask
-            .get(i as usize)
-            .map(|m| (m >> offset) & 0x1 == 0x1)
+            .get(i)
+            .map(|m| (m.clone() >> offset) & T::ONE == T::ONE)
             .ok_or(Error::IndexOutOfBounds)
     }
-
-    pub fn count_ones(&self) -> u32 {
-        self.mask.iter().map(|m| m.count_ones()).sum()
-    }
-
-    pub fn trailing_zeros(&self) -> u32 {
-        let mut acc = 0;
-        for m in &self.mask {
-            let t = m.trailing_zeros();
-            if t != 64 {
-                return acc + t;
-            }
-            acc += 64;
-        }
-        self.size
-    }
 }
 
-impl PartialEq for BitMask {
+impl<T: PartialEq> PartialEq for BitMask<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.mask == other.mask
+        self.mask == other.mask && self.size == other.size
     }
 }
 
-impl Eq for BitMask {}
+impl<T: PartialEq> Eq for BitMask<T> {}
 
-impl BitAnd for BitMask {
-    type Output = BitMask;
-
-    fn bitand(self, rhs: Self) -> Self::Output {
-        let mut res = BitMask::zeros(self.size.max(rhs.size));
-
-        for block_index in 0..res.mask.len() {
-            res.mask[block_index] = (self.mask.get(block_index).map_or(0x0, |block| *block))
-                & (rhs.mask.get(block_index).map_or(0x0, |block| *block));
-        }
-
-        res
-    }
-}
-
-impl BitAndAssign for BitMask {
-    fn bitand_assign(&mut self, rhs: Self) {
-        for block_index in 0..self.mask.len() {
-            self.mask[block_index] &= rhs.mask.get(block_index).map_or(0x0, |block| *block);
-        }
-    }
-}
-
-impl BitOr for BitMask {
-    type Output = BitMask;
+impl<T> BitOr for BitMask<T>
+where
+    T: BitStorage
+        + BitOr<Output = T>
+        + Not<Output = T>
+        + BitAnd<Output = T>
+        + Clone
+        + Not<Output = T>
+        + BitAnd<Output = T>
+        + Clone
+        + BitAndAssign
+        + BitOrAssign
+        + PartialEq,
+{
+    type Output = BitMask<T>;
 
     fn bitor(self, rhs: Self) -> Self::Output {
         let mut res = BitMask::zeros(self.size.max(rhs.size));
 
         for block_index in 0..res.mask.len() {
-            res.mask[block_index] = (self.mask.get(block_index).map_or(0x0, |block| *block))
-                | (rhs.mask.get(block_index).map_or(0x0, |block| *block));
+            res.mask[block_index] = (self
+                .mask
+                .get(block_index)
+                .map_or(T::ZERO, |block| block.clone()))
+                | (rhs
+                    .mask
+                    .get(block_index)
+                    .map_or(T::ZERO, |block| block.clone()));
         }
 
         res
     }
 }
 
-impl BitOrAssign for BitMask {
+impl<T> BitOrAssign for BitMask<T>
+where
+    T: BitStorage
+        + BitOr<Output = T>
+        + Not<Output = T>
+        + BitAnd<Output = T>
+        + Clone
+        + Not<Output = T>
+        + BitAnd<Output = T>
+        + Clone
+        + BitAndAssign
+        + BitOrAssign
+        + PartialEq,
+{
     fn bitor_assign(&mut self, rhs: Self) {
-        self.mask.resize(self.mask.len().max(rhs.mask.len()), 0);
+        self.mask
+            .resize(self.mask.len().max(rhs.mask.len()), T::ZERO);
         self.size = self.size.max(rhs.size);
         for block_index in 0..self.mask.len() {
-            self.mask[block_index] |= rhs.mask.get(block_index).map_or(0x0, |block| *block);
+            self.mask[block_index] |= rhs
+                .mask
+                .get(block_index)
+                .map_or(T::ZERO, |block| block.clone());
         }
     }
 }
 
-impl Display for BitMask {
+impl<T> BitAnd for BitMask<T>
+where
+    T: BitStorage
+        + BitOr<Output = T>
+        + Not<Output = T>
+        + BitAnd<Output = T>
+        + Clone
+        + Not<Output = T>
+        + BitAnd<Output = T>
+        + Clone
+        + BitAndAssign
+        + BitOrAssign
+        + PartialEq,
+{
+    type Output = BitMask<T>;
+
+    fn bitand(self, rhs: Self) -> Self::Output {
+        let mut res = BitMask::zeros(self.size.max(rhs.size));
+
+        for block_index in 0..res.mask.len() {
+            res.mask[block_index] = (self
+                .mask
+                .get(block_index)
+                .map_or(T::ZERO, |block| block.clone()))
+                & (rhs
+                    .mask
+                    .get(block_index)
+                    .map_or(T::ZERO, |block| block.clone()));
+        }
+
+        res
+    }
+}
+
+impl<T> BitAndAssign for BitMask<T>
+where
+    T: BitStorage
+        + BitOr<Output = T>
+        + Not<Output = T>
+        + BitAnd<Output = T>
+        + Clone
+        + Not<Output = T>
+        + BitAnd<Output = T>
+        + Clone
+        + BitAndAssign
+        + BitOrAssign
+        + PartialEq,
+{
+    fn bitand_assign(&mut self, rhs: Self) {
+        for block_index in 0..self.mask.len() {
+            self.mask[block_index] &= rhs
+                .mask
+                .get(block_index)
+                .map_or(T::ZERO, |block| block.clone());
+        }
+    }
+}
+
+impl<T: BitStorage + Display + Binary> Display for BitMask<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let mut s = String::new();
 
-        let mut rem = self.size as i32;
+        let mut rem = self.size as isize;
         for m in &self.mask {
-            let size = rem.min(64); // min(rem, 64)
+            dbg!(rem);
+
+            let size = rem.min(T::SIZE as isize) as usize; // min(rem, 64)
+            dbg!(size);
+
             s.push_str(
-                &format!("{:#066b}", m)[(66 - size) as usize..]
+                &format!("{:#0w$b}", m, w = T::SIZE + 2)[(T::SIZE + 2 - size)..]
                     .chars()
                     .rev()
                     .collect::<String>(),
             );
-            rem -= 64;
+            rem -= T::SIZE as isize;
         }
 
         write!(f, "{}", s)
@@ -182,29 +313,29 @@ mod tests {
 
     #[test]
     fn test_print() {
-        let mask = BitMask::zeros(5);
+        let mask: BitMask<u64> = BitMask::zeros(5);
         assert_eq!(mask.to_string(), "00000".to_string());
 
-        let mask = BitMask::zeros(64);
+        let mask: BitMask<u64> = BitMask::zeros(64);
         assert_eq!(mask.to_string(), String::from_utf8(vec![b'0'; 64]).unwrap());
 
-        let mask = BitMask::zeros(75);
+        let mask: BitMask<u64> = BitMask::zeros(75);
         assert_eq!(mask.to_string(), String::from_utf8(vec![b'0'; 75]).unwrap());
 
-        let mut mask = BitMask::zeros(3);
+        let mut mask: BitMask<u64> = BitMask::zeros(3);
         mask.set(1, true).unwrap();
         assert_eq!(mask.to_string(), "010".to_string());
     }
 
     #[test]
-    fn test_get_set() {
-        let mut mask = BitMask::zeros(5);
+    fn test_get_set_u64() {
+        let mut mask: BitMask<u64> = BitMask::zeros(5);
         mask.set(1, true).unwrap();
         assert_eq!(mask.get(0).unwrap(), false);
         assert_eq!(mask.get(1).unwrap(), true);
         assert_eq!(mask.to_string(), "01000".to_string());
 
-        let mut mask = BitMask::zeros(5);
+        let mut mask: BitMask<u64> = BitMask::zeros(5);
         mask.set_all(true);
         mask.set(1, false).unwrap();
         assert_eq!(mask.get(0).unwrap(), true);
@@ -213,9 +344,63 @@ mod tests {
     }
 
     #[test]
+    fn test_get_set_u16() {
+        let mut mask: BitMask<u16> = BitMask::zeros(17);
+        mask.set(1, true).unwrap();
+        assert_eq!(mask.get(0).unwrap(), false);
+        assert_eq!(mask.get(1).unwrap(), true);
+        assert_eq!(mask.to_string(), "01000000000000000".to_string());
+
+        let mut mask: BitMask<u16> = BitMask::zeros(17);
+        mask.set_all(true);
+        mask.set(1, false).unwrap();
+        assert_eq!(mask.get(0).unwrap(), true);
+        assert_eq!(mask.get(1).unwrap(), false);
+        assert_eq!(mask.to_string(), "10111111111111111".to_string());
+    }
+
+    #[test]
+    fn test_get_set_u8() {
+        let mut mask: BitMask<u8> = BitMask::zeros(257);
+        mask.set(1, true).unwrap();
+        assert_eq!(mask.get(0).unwrap(), false);
+        assert_eq!(mask.get(1).unwrap(), true);
+        assert_eq!(mask.to_string(), "01000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".to_string());
+
+        let mut mask: BitMask<u8> = BitMask::zeros(257);
+        mask.set_all(true);
+        mask.set(1, false).unwrap();
+        assert_eq!(mask.get(0).unwrap(), true);
+        assert_eq!(mask.get(1).unwrap(), false);
+        assert_eq!(mask.to_string(), "10111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111".to_string());
+    }
+
+    #[test]
+    fn test_equals() {
+        let mut mask1: BitMask<u8> = BitMask::zeros(5);
+        mask1.set(1, true).unwrap();
+
+        let mut mask2: BitMask<u8> = BitMask::zeros(5);
+        mask2.set(1, true).unwrap();
+
+        assert_eq!(mask1, mask2);
+    }
+
+    #[test]
+    fn test_not_equals() {
+        let mut mask1: BitMask<u8> = BitMask::zeros(6);
+        mask1.set(1, true).unwrap();
+
+        let mut mask2: BitMask<u8> = BitMask::zeros(5);
+        mask2.set(1, true).unwrap();
+
+        assert_ne!(mask1, mask2);
+    }
+
+    #[test]
     fn test_or() {
-        let mut a = BitMask::zeros(3);
-        let mut b = BitMask::zeros(3);
+        let mut a: BitMask<u64> = BitMask::zeros(3);
+        let mut b: BitMask<u64> = BitMask::zeros(3);
 
         a.set(1, true).unwrap();
         b.set(2, true).unwrap();
@@ -225,8 +410,8 @@ mod tests {
 
     #[test]
     fn test_or_assign() {
-        let mut a = BitMask::ones(3);
-        let mut b = BitMask::ones(4);
+        let mut a: BitMask<u64> = BitMask::ones(3);
+        let mut b: BitMask<u64> = BitMask::ones(4);
         a.set(1, false).unwrap();
         b.set(1, false).unwrap();
 
@@ -237,8 +422,8 @@ mod tests {
 
     #[test]
     fn test_and() {
-        let mut a = BitMask::zeros(3);
-        let mut b = BitMask::zeros(3);
+        let mut a: BitMask<u64> = BitMask::zeros(3);
+        let mut b: BitMask<u64> = BitMask::zeros(3);
         a.set_all(true);
         b.set_all(true);
         a.set(1, false).unwrap();
@@ -249,8 +434,8 @@ mod tests {
 
     #[test]
     fn test_and_assign() {
-        let mut a = BitMask::zeros(3);
-        let mut b = BitMask::zeros(100);
+        let mut a: BitMask<u64> = BitMask::zeros(3);
+        let mut b: BitMask<u64> = BitMask::zeros(100);
         a.set_all(true);
         b.set_all(true);
         a.set(1, false).unwrap();
@@ -259,32 +444,5 @@ mod tests {
         a &= b;
 
         assert_eq!(a.to_string(), "100".to_string());
-    }
-
-    #[test]
-    fn test_eq() {
-        let mut a = BitMask::zeros(3);
-        let mut b = BitMask::zeros(3);
-
-        a.set_all(true);
-
-        a.set(1, false).unwrap();
-        b.set(0, true).unwrap();
-        b.set(2, true).unwrap();
-
-        println!("{}, {}", a, b);
-
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn test_ne() {
-        let mut a = BitMask::zeros(3);
-        let mut b = BitMask::zeros(3);
-
-        a.set(1, true).unwrap();
-        b.set(2, true).unwrap();
-
-        assert_ne!(a, b);
     }
 }
