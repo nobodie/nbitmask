@@ -1,4 +1,4 @@
-use bitmask::BitMask;
+use nbitmask::BitMask;
 
 #[test]
 fn test_print() {

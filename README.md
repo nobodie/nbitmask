@@ -1,3 +1,5 @@
+[![CI Checks](https://github.com/nobodie/nbitmask/actions/workflows/rust.yml/badge.svg?branch=master)](https://github.com/nobodie/nbitmask/actions/workflows/rust.yml)
+
 # nbitmask
 
 todo :
