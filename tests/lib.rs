@@ -259,7 +259,7 @@ fn test_example() {
     mask.set(4, true).unwrap_or_else(|err| println!("{}", err));
 
     mask &= &ones;
-    println!("mask size didn't change : {}", mask.size());
+    println!("mask size didn't change : {}", mask.length());
 
     let mask_copy = mask.clone();
 

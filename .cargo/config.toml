@@ -1,0 +1,5 @@
+[alias]
+all-test = "test --all-features"
+all-clippy = "clippy --all-features"
+all-check = "check --all-features"
+all-doc = "doc --all-features"

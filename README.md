@@ -1,10 +1,6 @@
 
 # nbitmask
 
-todo :
-- full documentation
-
-
 ---
 
 [![CI Checks](https://github.com/nobodie/nbitmask/actions/workflows/rust.yml/badge.svg?branch=master)](https://github.com/nobodie/nbitmask/actions/workflows/rust.yml)
@@ -17,6 +13,8 @@ Supported container types :
 * u32
 * u64
 * u128
+
+This crate provides support for Serialization via Serde through the optional "serde" feature. Make sure to add it into your Cargo.toml if you want it !
 
 ```
 [dependencies]

@@ -1,8 +1,10 @@
-#![deny(clippy::all)]
+#![deny(clippy::all, clippy::unwrap_used)]
 
 pub mod bit_storage;
 pub mod error;
 
+#[cfg(feature = "serde")]
+pub mod serde;
 use std::fmt::Binary;
 
 use std::ops::{BitXor, BitXorAssign, Not, Shl, ShlAssign, Shr, ShrAssign, Sub};
@@ -15,30 +17,35 @@ use std::{
 use bit_storage::BitStorage;
 use error::BitMaskError;
 
+///Struct storing the bitmask in a vec of BitStorage T.
 #[derive(Clone, Debug)]
 pub struct BitMask<T> {
     mask: Vec<T>,
-    size: usize,
+    length: usize,
 }
-
 impl<T> BitMask<T>
 where
     T: BitStorage + Clone,
 {
+    ///Creates a new BitMask of *size* and fill it with BitStorage::ZERO
     pub fn zeros(size: usize) -> BitMask<T> {
         BitMask {
             mask: vec![T::ZERO; (size / T::SIZE) + 1],
-            size,
+            length: size,
         }
     }
 
-    pub fn size(&self) -> usize {
-        self.size
+    ///Returns BitMask's length
+    pub fn length(&self) -> usize {
+        self.length
     }
+
+    ///Returns the number of bits set to BitStorage::ONE within the mask
     pub fn count_ones(&self) -> usize {
         self.mask.iter().map(|m| m.count_ones()).sum()
     }
 
+    ///Returns the number trailing BitStorage::ZERO within the mask
     pub fn trailing_zeros(&self) -> usize {
         let mut acc = 0;
         for m in &self.mask {
@@ -48,7 +55,7 @@ where
             }
             acc += T::SIZE;
         }
-        self.size
+        self.length
     }
 }
 
@@ -61,21 +68,23 @@ where
         + Shl<usize, Output = T>
         + Sub<Output = T>,
 {
+    ///Creates a new BitMask of *size* and fill it with BitStorage::ONE
     pub fn ones(size: usize) -> BitMask<T> {
         let mut mask = Self::zeros(size);
         mask.set_all(true);
         mask
     }
 
+    ///Sets all the bits to BitStorage::ONE
     pub fn set_all(&mut self, value: bool) {
         let s = if value { !T::ZERO } else { T::ZERO };
         for m in &mut self.mask {
             *m = s.clone();
         }
 
-        let last = self.size / T::SIZE;
+        let last = self.length / T::SIZE;
         if let Some(m) = self.mask.get_mut(last) {
-            let offset = self.size % T::SIZE;
+            let offset = self.length % T::SIZE;
             *m &= (T::ONE << offset) - T::ONE;
         }
     }
@@ -85,8 +94,9 @@ impl<T> BitMask<T>
 where
     T: BitStorage + Not<Output = T> + BitAndAssign + BitOrAssign + Shl<usize, Output = T>,
 {
+    ///Sets bit at *index* to true or false
     pub fn set(&mut self, index: usize, value: bool) -> Result<(), BitMaskError> {
-        if index >= self.size {
+        if index >= self.length {
             return Err(BitMaskError::IndexOutOfBounds);
         }
         let i = index / T::SIZE;
@@ -109,8 +119,11 @@ impl<T> BitMask<T>
 where
     T: BitStorage + BitAnd<Output = T> + Clone + PartialEq + Shr<usize, Output = T>,
 {
+    /// Returns a Result that can be :
+    /// - the boolean value of the bit at given index, if the index is within [0:length-1]
+    /// - BitMaskError::IndexOutOfBounds if the index is out of bounds
     pub fn get(&self, index: usize) -> Result<bool, BitMaskError> {
-        if index >= self.size {
+        if index >= self.length {
             return Err(BitMaskError::IndexOutOfBounds);
         }
         let i = index / T::SIZE;
@@ -124,7 +137,7 @@ where
 
 impl<T: PartialEq> PartialEq for BitMask<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.mask == other.mask && self.size == other.size
+        self.mask == other.mask && self.length == other.length
     }
 }
 
@@ -137,7 +150,7 @@ where
     fn bitor_assign(&mut self, rhs: &Self) {
         self.mask
             .resize(self.mask.len().max(rhs.mask.len()), T::ZERO);
-        self.size = self.size.max(rhs.size);
+        self.length = self.length.max(rhs.length);
         for block_index in 0..self.mask.len() {
             self.mask[block_index] |= rhs
                 .mask
@@ -167,7 +180,7 @@ where
     fn bitxor_assign(&mut self, rhs: &Self) {
         self.mask
             .resize(self.mask.len().max(rhs.mask.len()), T::ZERO);
-        self.size = self.size.max(rhs.size);
+        self.length = self.length.max(rhs.length);
         for block_index in 0..self.mask.len() {
             self.mask[block_index] ^= rhs
                 .mask
@@ -236,8 +249,8 @@ where
         }
 
         //Performing a bitwise and on the last BitStorage unit to remove the remaining bits eventually set to 1 by not operator
-        let mask: BitMask<T> = BitMask::ones(res.size % T::SIZE);
-        res.mask[res.size / T::SIZE] &= mask.mask[0].clone();
+        let mask: BitMask<T> = BitMask::ones(res.length % T::SIZE);
+        res.mask[res.length / T::SIZE] &= mask.mask[0].clone();
 
         res
     }
@@ -271,32 +284,6 @@ where
             block_copy_to_get_data_from |= next_block_copy_to_get_data_from;
 
             self.mask[index] = block_copy_to_get_data_from;
-
-            /*if rhs >= T::SIZE {
-                            self.mask[index] = T::ZERO;
-                        } else {
-                            self.mask[index] >>= rhs;
-                        }
-
-                        println!("index {}", index);
-
-                        let block_to_shift_index = index + (rhs / T::SIZE);
-                        println!("index block to shift from {}", block_to_shift_index);
-
-                        let mut block_to_shift_val = self
-                            .mask
-                            .get(block_to_shift_index)
-                            .unwrap_or(&T::ZERO)
-                            .clone();
-
-                        println!("block value : {:?}", block_to_shift_val);
-
-                        println!("shift value : {:?}", T::SIZE - (rhs % T::SIZE));
-
-                        block_to_shift_val <<= T::SIZE - (rhs % T::SIZE);
-                        println!("block value : {:?}", block_to_shift_val);
-
-            self.mask[index] |= block_to_shift_val;*/
         }
     }
 }
@@ -357,7 +344,7 @@ impl<T: BitStorage + Display + Binary> Display for BitMask<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let mut s = String::new();
 
-        let mut rem = self.size as isize;
+        let mut rem = self.length as isize;
         for m in &self.mask {
             let size = rem.min(T::SIZE as isize) as usize;
 
